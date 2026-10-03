@@ -28,7 +28,15 @@ Below is a basic overview of the project structure:
 
 Before you start, you'll need to install [NodeJS](https://nodejs.org/en/download/) and [create a Discord app](https://discord.com/developers/applications) with the proper permissions:
 - `applications.commands`
-- `bot` (with Send Messages enabled)
+- `bot` (with Send Messages, Connect, and Speak permissions)
+
+The `/join` command joins the voice channel of the member who invoked it. Use `/disconnect` to make the bot leave its current voice channel in that server. Otherwise, the bot disconnects after 30 minutes without another successful `/join` or spoken DM; either activity resets the timer.
+
+After adding or changing slash commands, publish them to Discord from the `discord-app` directory with `npm run register`. This replaces the app's global command list and reports an error if Discord rejects the registration. Restart the bot process after deploying code changes.
+
+While you are in a voice channel the bot has joined, DM the bot text to have it read aloud there. If the bot is connected to multiple voice channels where you are present, it uses the connection with the most recent activity. Speech is generated locally with Windows Speech (no cloud TTS key is needed), so the bot host must be Windows. The app subscribes to the `Guilds`, `Guild Voice States`, and `Direct Messages` Gateway intents. The bot must be in the server and have permission to connect to the channel.
+
+The voice library needs an encryption implementation to establish voice connections; `@noble/ciphers` is included for this. The app forwards both voice handshake packets directly to the voice adapter so networking starts regardless of which packet Discord sends first. Each join logs when the adapter receives these packets and whether networking starts. Set `VOICE_DEBUG=true` in `.env` for additional voice-library handshake diagnostics.
 
 
 Configuring the app is covered in detail in the [getting started guide](https://discord.com/developers/docs/getting-started).

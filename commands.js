@@ -44,6 +44,22 @@ const CHALLENGE_COMMAND = {
   contexts: [0, 2],
 };
 
-const ALL_COMMANDS = [TEST_COMMAND, CHALLENGE_COMMAND];
+const JOIN_COMMAND = {
+  name: 'join',
+  description: 'Join your current voice channel',
+  type: 1,
+  integration_types: [0],
+  contexts: [0],
+};
 
-InstallGlobalCommands(process.env.APP_ID, ALL_COMMANDS);
+const DISCONNECT_COMMAND = {
+  name: 'disconnect',
+  description: 'Disconnect from the current voice channel',
+  type: 1,
+  integration_types: [0],
+  contexts: [0],
+};
+
+const ALL_COMMANDS = [TEST_COMMAND, CHALLENGE_COMMAND, JOIN_COMMAND, DISCONNECT_COMMAND];
+
+await InstallGlobalCommands(process.env.APP_ID, ALL_COMMANDS);
