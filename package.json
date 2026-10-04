@@ -1,8 +1,8 @@
 {
-  "name": "discord-getting-started",
+  "name": "michaelphone-discord-bot",
   "private": true,
   "version": "1.0.0",
-  "description": "Discord example app",
+  "description": "Discord bot for reading direct messages aloud in voice channels",
   "main": "app.js",
   "type": "module",
   "engines": {
