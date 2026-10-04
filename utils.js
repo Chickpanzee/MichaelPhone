@@ -31,13 +31,3 @@ export async function InstallGlobalCommands(appId, commands) {
   await DiscordRequest(endpoint, { method: 'PUT', body: commands });
   console.log(`Registered ${commands.length} global application commands.`);
 }
-
-// Simple method that returns a random emoji from list
-export function getRandomEmoji() {
-  const emojiList = ['😭','😄','😌','🤓','😎','😤','🤖','😶‍🌫️','🌏','📸','💿','👋','🌊','✨'];
-  return emojiList[Math.floor(Math.random() * emojiList.length)];
-}
-
-export function capitalize(str) {
-  return str.charAt(0).toUpperCase() + str.slice(1);
-}

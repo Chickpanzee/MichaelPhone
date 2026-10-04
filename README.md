@@ -15,7 +15,6 @@ direct messages aloud using Windows' built-in speech synthesis.
   the connection with the most recent activity.
 - The bot disconnects after 30 minutes without a successful `/join` or spoken
   DM. Either activity restarts the idle timer.
-- `/test` is a basic test command.
 
 Speech synthesis runs locally through Windows Speech; no cloud TTS service or
 key is needed. The bot must run on Windows for speech playback.

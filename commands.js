@@ -1,15 +1,6 @@
 import 'dotenv/config';
 import { InstallGlobalCommands } from './utils.js';
 
-// Simple test command
-const TEST_COMMAND = {
-  name: 'test',
-  description: 'Basic command',
-  type: 1,
-  integration_types: [0, 1],
-  contexts: [0, 1, 2],
-};
-
 const JOIN_COMMAND = {
   name: 'join',
   description: 'Join your current voice channel',
@@ -34,6 +25,6 @@ const CLEAR_COMMAND = {
   contexts: [1],
 };
 
-const ALL_COMMANDS = [TEST_COMMAND, JOIN_COMMAND, DISCONNECT_COMMAND, CLEAR_COMMAND];
+const ALL_COMMANDS = [JOIN_COMMAND, DISCONNECT_COMMAND, CLEAR_COMMAND];
 
 await InstallGlobalCommands(process.env.APP_ID, ALL_COMMANDS);
