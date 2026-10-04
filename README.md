@@ -33,13 +33,21 @@ end-to-end voice encryption protocol) support.
 
 ## Configure
 
+<<<<<<< HEAD
 Install dependencies from the repository root:
+=======
+Install dependencies from this directory:
+>>>>>>> 2006c3ee3f64b59c067de412cce0a141ff1d54ca
 
 ```powershell
 npm install
 ```
 
+<<<<<<< HEAD
 Create a `.env` file in the repository root with your Discord application's
+=======
+Create a `.env` file in this directory with your Discord application's
+>>>>>>> 2006c3ee3f64b59c067de412cce0a141ff1d54ca
 credentials:
 
 ```dotenv
