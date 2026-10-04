@@ -14,7 +14,7 @@ import {
   StreamType,
   VoiceConnectionStatus,
 } from '@discordjs/voice';
-import { Client, GatewayIntentBits, Partials } from 'discord.js';
+import { ChannelType, Client, GatewayIntentBits, Partials } from 'discord.js';
 import {
   ButtonStyleTypes,
   InteractionResponseFlags,
@@ -24,14 +24,11 @@ import {
   verifyKeyMiddleware,
 } from 'discord-interactions';
 import { getRandomEmoji, DiscordRequest } from './utils.js';
-import { getShuffledOptions, getResult } from './game.js';
 
 // Create an express app
 const app = express();
 // Get port, or default to 3000
 const PORT = process.env.PORT || 3000;
-// To keep track of our active games
-const activeGames = {};
 const voiceIdleTimeouts = new Map();
 const voicePlayers = new Map();
 const speechQueues = new Map();
@@ -321,6 +318,43 @@ async function editInteractionResponse(applicationId, token, content) {
   }
 }
 
+async function getInteractionResponse(applicationId, token) {
+  const response = await fetch(
+    `https://discord.com/api/v10/webhooks/${applicationId}/${token}/messages/@original`,
+  );
+
+  if (!response.ok) {
+    const details = await response.text();
+    throw new Error(`Failed to fetch interaction response (${response.status}): ${details}`);
+  }
+
+  return response.json();
+}
+
+async function clearBotMessages(channel, responseMessageId) {
+  let deletedCount = 0;
+  let before;
+
+  while (true) {
+    const options = { limit: 100 };
+    if (before) options.before = before;
+    const messages = await channel.messages.fetch(options);
+    if (messages.size === 0) break;
+
+    const oldestMessage = messages.last();
+    for (const message of messages.values()) {
+      if (message.author.id !== client.user.id || message.id === responseMessageId) continue;
+      await message.delete();
+      deletedCount += 1;
+    }
+
+    if (messages.size < 100) break;
+    before = oldestMessage.id;
+  }
+
+  return deletedCount;
+}
+
 /**
  * Interactions endpoint URL where Discord will send HTTP requests
  * Parse request body and verifies incoming requests using discord-interactions package
@@ -342,6 +376,52 @@ app.post('/interactions', verifyKeyMiddleware(process.env.PUBLIC_KEY), async fun
    */
   if (type === InteractionType.APPLICATION_COMMAND) {
     const { name } = data;
+
+    if (name === 'clear') {
+      const channelId = req.body.channel_id;
+      if (req.body.guild_id || !channelId) {
+        return res.send({
+          type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+          data: {
+            content: 'Use this command in a direct message with the bot.',
+            flags: InteractionResponseFlags.EPHEMERAL,
+          },
+        });
+      }
+
+      res.send({
+        type: InteractionResponseType.DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE,
+        data: { flags: InteractionResponseFlags.EPHEMERAL },
+      });
+
+      try {
+        const channel = await client.channels.fetch(channelId);
+        if (!channel || channel.type !== ChannelType.DM) {
+          throw new Error(`Interaction channel ${channelId} is not a direct message with the bot.`);
+        }
+
+        const originalResponse = await getInteractionResponse(process.env.APP_ID, req.body.token);
+        const deletedCount = await clearBotMessages(channel, originalResponse.id);
+        console.info(`[clear:${channelId}] Deleted ${deletedCount} bot-authored DM messages.`);
+        await editInteractionResponse(
+          process.env.APP_ID,
+          req.body.token,
+          `Deleted ${deletedCount} of my messages from this DM. Your messages can't be deleted by the bot.`,
+        );
+      } catch (error) {
+        console.error(`[clear:${channelId}] Failed to clear bot messages from DM:`, error);
+        try {
+          await editInteractionResponse(
+            process.env.APP_ID,
+            req.body.token,
+            "I couldn't finish clearing my messages from this DM. Check the bot logs for details.",
+          );
+        } catch (responseError) {
+          console.error(`[clear:${channelId}] Failed to report the clear error:`, responseError);
+        }
+      }
+      return;
+    }
 
     if (name === 'disconnect') {
       const guildId = req.body.guild_id;

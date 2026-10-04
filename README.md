@@ -1,20 +1,21 @@
 # MichaelPhone Discord Bot
 
 MichaelPhone is a Discord bot that can join a server voice channel and read your
-direct messages aloud using Windows' built-in speech synthesis. It also retains
-the original rock-paper-scissors example commands.
+direct messages aloud using Windows' built-in speech synthesis.
 
 ## Features
 
 - `/join` connects the bot to the voice channel you're currently in.
 - `/disconnect` makes the bot leave its voice channel in the current server.
+- `/clear` in a direct message removes the bot's existing messages from that
+  DM, then reports how many it deleted. Discord does not let the bot delete
+  messages you sent, and the command's confirmation remains in the conversation.
 - DM the bot while you share a voice channel with it, and it reads your message
   aloud. If you're in more than one server where the bot is connected, it uses
   the connection with the most recent activity.
 - The bot disconnects after 30 minutes without a successful `/join` or spoken
   DM. Either activity restarts the idle timer.
-- `/challenge` starts a rock-paper-scissors match, and `/test` is a basic test
-  command.
+- `/test` is a basic test command.
 
 Speech synthesis runs locally through Windows Speech; no cloud TTS service or
 key is needed. The bot must run on Windows for speech playback.
