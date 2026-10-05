@@ -7,6 +7,9 @@ direct messages aloud using Windows' built-in speech synthesis.
 
 - `/join` connects the bot to the voice channel you're currently in.
 - `/disconnect` makes the bot leave its voice channel in the current server.
+- The owner-only `/restart` command leaves every voice channel before restarting,
+  then rejoins the same channels after the bot reconnects to Discord. The
+  replacement process writes startup and rejoin logs to `data/restart.log`.
 - `/clear` in a direct message removes the bot's existing messages from that
   DM, then reports how many it deleted. Discord does not let the bot delete
   messages you sent, and the command's confirmation remains in the conversation.
@@ -56,11 +59,13 @@ APP_ID=your_application_id
 DISCORD_TOKEN=your_bot_token
 PUBLIC_KEY=your_application_public_key
 PORT=3000
+BOT_OWNER_ID=your_discord_user_id
 ```
 
 Keep the bot token private and do not commit `.env`. `PORT` is optional; the
-server defaults to port `3000`. For additional voice-library handshake logs,
-you can also set:
+server defaults to port `3000`. Set `BOT_OWNER_ID` to your numeric Discord user
+ID to authorize the owner-only `/restart` command. For additional voice-library
+handshake logs, you can also set:
 
 ```dotenv
 VOICE_DEBUG=true

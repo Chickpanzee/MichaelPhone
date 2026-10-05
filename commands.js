@@ -42,6 +42,14 @@ const SHOUT_COMMAND = {
   ],
 };
 
+const RESTART_COMMAND = {
+  name: 'restart',
+  description: 'Restart the bot (owner only)',
+  type: 1,
+  integration_types: [0],
+  contexts: [1],
+};
+
 const ABBREVIATIONS_COMMAND = {
   name: 'abbreviations',
   description: 'Manage your personal spoken abbreviations',
@@ -102,6 +110,7 @@ const ALL_COMMANDS = [
   DISCONNECT_COMMAND,
   CLEAR_COMMAND,
   SHOUT_COMMAND,
+  RESTART_COMMAND,
   ABBREVIATIONS_COMMAND,
 ];
 

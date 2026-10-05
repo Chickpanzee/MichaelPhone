@@ -2,6 +2,7 @@ import 'dotenv/config';
 import { spawn } from 'node:child_process';
 import express from 'express';
 import { randomUUID } from 'node:crypto';
+import { closeSync, mkdirSync, openSync } from 'node:fs';
 import { promises as fs } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -27,6 +28,8 @@ import {
 const app = express();
 // Get port, or default to 3000
 const PORT = process.env.PORT || 3000;
+let server;
+const RESTART_LOG_FILE = join(process.cwd(), 'data', 'restart.log');
 const voiceIdleTimeouts = new Map();
 const voicePlayers = new Map();
 const speechQueues = new Map();
@@ -36,6 +39,7 @@ const VOICE_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
 const VOICE_PLAYBACK_TIMEOUT_MS = 10 * 60 * 1000;
 const VOICE_DEBUG_ENABLED = process.env.VOICE_DEBUG === 'true';
 let abbreviationSettingsWrite = Promise.resolve();
+let restartInProgress = false;
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -221,6 +225,49 @@ function disconnectVoiceConnection(guildId) {
   return true;
 }
 
+function waitForVoiceDisconnect(guildId, timeoutMs = 5000) {
+  return new Promise((resolve) => {
+    const finish = (confirmed) => {
+      clearTimeout(timeout);
+      client.off('voiceStateUpdate', onVoiceStateUpdate);
+      resolve(confirmed);
+    };
+    const onVoiceStateUpdate = (oldState, newState) => {
+      if (
+        newState.guild.id === guildId &&
+        newState.id === client.user?.id &&
+        newState.channelId === null
+      ) {
+        finish(true);
+      }
+    };
+    const timeout = setTimeout(() => finish(false), timeoutMs);
+    client.on('voiceStateUpdate', onVoiceStateUpdate);
+  });
+}
+
+async function disconnectVoiceConnectionsForRestart() {
+  const guildIds = [...voiceIdleTimeouts.keys()];
+  const disconnects = new Map(
+    guildIds.map((guildId) => [guildId, waitForVoiceDisconnect(guildId)]),
+  );
+
+  for (const guildId of guildIds) {
+    disconnectVoiceConnection(guildId);
+  }
+
+  const results = await Promise.all(
+    [...disconnects].map(async ([guildId, disconnected]) => {
+      const confirmed = await disconnected;
+      if (!confirmed) {
+        console.error(`[voice:${guildId}] Did not receive confirmation that the bot left before restart.`);
+      }
+      return confirmed;
+    }),
+  );
+  return results.every(Boolean);
+}
+
 function findJoinedVoiceConnection(userId) {
   return [...voiceIdleTimeouts.entries()]
     .map(([guildId, activeConnection]) => {
@@ -237,6 +284,140 @@ function findJoinedVoiceConnection(userId) {
     })
     .filter((match) => match !== undefined)
     .sort((a, b) => b.activeConnection.lastActivityAt - a.activeConnection.lastActivityAt)[0];
+}
+
+function ensureVoicePlayer(guildId, connection) {
+  let voicePlayer = voicePlayers.get(guildId);
+  if (voicePlayer?.connection === connection) return voicePlayer;
+
+  voicePlayer?.player.stop(true);
+  const player = createAudioPlayer();
+  player.on('error', (error) => {
+    console.error(`[voice:${guildId}] Voice audio player error:`, error);
+  });
+  connection.subscribe(player);
+  voicePlayer = { connection, player };
+  voicePlayers.set(guildId, voicePlayer);
+  console.info(`[voice:${guildId}] Audio player subscribed to voice connection.`);
+  return voicePlayer;
+}
+
+async function joinVoiceChannelInGuild(guild, channel) {
+  let connection;
+  try {
+    await guild.members.fetchMe();
+    connection = joinVoiceChannel({
+      channelId: channel.id,
+      guildId: guild.id,
+      selfDeaf: false,
+      selfMute: false,
+      adapterCreator: (methods) => guild.voiceAdapterCreator({
+        ...methods,
+        onVoiceStateUpdate: (packet) => {
+          console.info(`[voice:${guild.id}] Adapter received bot voice-state update.`);
+          methods.onVoiceStateUpdate(packet);
+          configureVoiceNetworking(connection, guild.id);
+        },
+        onVoiceServerUpdate: (packet) => {
+          console.info(
+            `[voice:${guild.id}] Adapter received voice-server update (endpoint: ${packet.endpoint ? 'present' : 'missing'}).`,
+          );
+          methods.onVoiceServerUpdate(packet);
+          configureVoiceNetworking(connection, guild.id);
+        },
+      }),
+      debug: VOICE_DEBUG_ENABLED,
+    });
+    connection.on('error', (error) => {
+      console.error(`[voice:${guild.id}] Voice connection error:`, error);
+    });
+    const observedNetworkings = new WeakSet();
+    connection.on('stateChange', (oldState, newState) => {
+      console.info(`[voice:${guild.id}] ${oldState.status} -> ${newState.status}`);
+      const networking = newState.networking;
+      if (!networking || observedNetworkings.has(networking)) return;
+
+      observedNetworkings.add(networking);
+      networking.on('stateChange', (oldNetworkingState, newNetworkingState) => {
+        console.info(
+          `[voice:${guild.id}] Voice network state: ${oldNetworkingState.code} -> ${newNetworkingState.code}`,
+        );
+      });
+      networking.on('close', (code) => {
+        console.error(`[voice:${guild.id}] Voice network WebSocket closed with code ${code}.`);
+      });
+    });
+    if (VOICE_DEBUG_ENABLED) {
+      connection.on('debug', (message) => {
+        console.debug(`[voice:${guild.id}] ${redactVoiceDebug(message)}`);
+      });
+    }
+    await entersState(connection, VoiceConnectionStatus.Ready, 15_000);
+    ensureVoicePlayer(guild.id, connection);
+    resetVoiceIdleTimeout(guild.id, connection);
+    return connection;
+  } catch (error) {
+    const connectionStatus = connection?.state.status ?? 'not created';
+    const receivedStateUpdate = Boolean(connection?.packets.state);
+    const receivedVoiceServerUpdate = Boolean(connection?.packets.server);
+    connection?.destroy();
+    console.error(
+      `Failed to join voice channel ${channel.id} in guild ${guild.id} ` +
+        `(state: ${connectionStatus}, voice state update: ${receivedStateUpdate}, ` +
+        `voice server update: ${receivedVoiceServerUpdate}):`,
+      error,
+    );
+    const message = error?.name === 'TimeoutError' || error?.code === 'ABORT_ERR'
+      ? `Discord's voice connection timed out while in the ${connectionStatus} state ` +
+        `(voice state update: ${receivedStateUpdate ? 'received' : 'missing'}, ` +
+        `voice server update: ${receivedVoiceServerUpdate ? 'received' : 'missing'}). Check the bot logs for connection details.`
+      : 'The Discord voice connection failed. Check the bot logs for details.';
+    const joinError = new Error(message);
+    joinError.cause = error;
+    throw joinError;
+  }
+}
+
+async function rejoinRestartedVoiceChannels() {
+  const savedChannels = process.env.MICHAELPHONE_REJOIN_CHANNELS;
+  delete process.env.MICHAELPHONE_REJOIN_CHANNELS;
+  if (!savedChannels) return;
+
+  let channels;
+  try {
+    channels = JSON.parse(savedChannels);
+  } catch (error) {
+    throw new Error('Restart voice-channel state is not valid JSON.', { cause: error });
+  }
+  if (
+    !Array.isArray(channels) ||
+    channels.some(
+      (entry) =>
+        !isRecord(entry) ||
+        typeof entry.guildId !== 'string' ||
+        typeof entry.channelId !== 'string',
+    )
+  ) {
+    throw new Error('Restart voice-channel state has an invalid format.');
+  }
+
+  console.info(`Attempting to rejoin ${channels.length} voice channel(s) after restart.`);
+  for (const { guildId, channelId } of channels) {
+    try {
+      const guild = client.guilds.cache.get(guildId) ?? await client.guilds.fetch(guildId);
+      const channel = guild.channels.cache.get(channelId) ?? await guild.channels.fetch(channelId);
+      if (!channel || !channel.isVoiceBased()) {
+        throw new Error(`Channel ${channelId} is not a voice channel.`);
+      }
+      await joinVoiceChannelInGuild(guild, channel);
+      console.info(`[voice:${guildId}] Rejoined voice channel ${channelId} after restart.`);
+    } catch (error) {
+      console.error(
+        `[voice:${guildId}] Failed to rejoin voice channel ${channelId} after restart:`,
+        error,
+      );
+    }
+  }
 }
 
 async function createSpeechFile(text) {
@@ -384,22 +565,18 @@ async function speakInVoiceChannel(guildId, connection, text, shout = false) {
   try {
     if (shout) filePath = await normalizeShoutFile(speechFilePath);
 
-    let voicePlayer = voicePlayers.get(guildId);
-    if (voicePlayer?.connection !== connection) {
-      voicePlayer?.player.stop(true);
-      const player = createAudioPlayer();
-      player.on('error', (error) => console.error('Voice audio player error:', error));
-      connection.subscribe(player);
-      voicePlayer = { connection, player };
-      voicePlayers.set(guildId, voicePlayer);
-    }
+    const voicePlayer = ensureVoicePlayer(guildId, connection);
 
     const resource = createAudioResource(
       filePath,
       { inputType: StreamType.Arbitrary },
     );
     resetVoiceIdleTimeout(guildId, connection);
+    console.info(
+      `[voice:${guildId}] Starting ${shout ? 'shout' : 'DM'} playback (${text.length} characters).`,
+    );
     await playAudioResource(voicePlayer.player, resource);
+    console.info(`[voice:${guildId}] Playback finished.`);
   } finally {
     await fs.rm(filePath, { force: true });
     if (filePath !== speechFilePath) {
@@ -427,12 +604,14 @@ client.on('messageCreate', (message) => {
 
   const match = findJoinedVoiceConnection(message.author.id);
   if (!match) {
+    console.info(`[dm:${message.author.id}] No ready shared voice connection found.`);
     void message.reply(
       'Join a voice channel that I have joined, then DM me the text you want me to read aloud.',
     ).catch((error) => console.error('Failed to reply to DM:', error));
     return;
   }
 
+  console.info(`[dm:${message.author.id}] Queuing speech in guild ${match.guildId}.`);
   resetVoiceIdleTimeout(match.guildId, match.activeConnection.connection);
   void enqueueSpeech(
     match.guildId,
@@ -466,6 +645,98 @@ async function editInteractionResponse(applicationId, token, content) {
     const details = await response.text();
     throw new Error(`Failed to update interaction response (${response.status}): ${details}`);
   }
+}
+
+function closeServer() {
+  return new Promise((resolve, reject) => {
+    server.close((error) => {
+      if (error) reject(error);
+      else resolve();
+    });
+    server.closeIdleConnections?.();
+  });
+}
+
+async function restartBot(token) {
+  if (restartInProgress) return;
+  restartInProgress = true;
+
+  try {
+    await editInteractionResponse(process.env.APP_ID, token, 'Restarting the bot now...');
+  } catch (error) {
+    console.error('Failed to confirm bot restart:', error);
+  }
+
+  const channelsToRejoin = [...voiceIdleTimeouts.entries()].map(([guildId, activeConnection]) => ({
+    guildId,
+    channelId: activeConnection.connection.joinConfig.channelId,
+  }));
+
+  try {
+    await closeServer();
+  } catch (error) {
+    console.error('Failed to close the HTTP server for restart:', error);
+    await editInteractionResponse(
+      process.env.APP_ID,
+      token,
+      "I couldn't close the HTTP server, so the bot is still running.",
+    ).catch((responseError) => console.error('Failed to report restart error:', responseError));
+    restartInProgress = false;
+    return;
+  }
+
+  try {
+    const allDisconnected = await disconnectVoiceConnectionsForRestart();
+    if (!allDisconnected) {
+      console.warn('Proceeding with restart despite an unconfirmed voice disconnect.');
+    }
+    await client.destroy();
+  } catch (error) {
+    console.error('Failed to shut down cleanly for restart:', error);
+    process.exitCode = 1;
+    process.exit();
+    return;
+  }
+
+  let child;
+  let logFileDescriptor;
+  try {
+    mkdirSync(dirname(RESTART_LOG_FILE), { recursive: true });
+    logFileDescriptor = openSync(RESTART_LOG_FILE, 'a');
+    child = spawn(process.execPath, process.argv.slice(1), {
+      cwd: process.cwd(),
+      detached: true,
+      env: {
+        ...process.env,
+        MICHAELPHONE_REJOIN_CHANNELS: JSON.stringify(channelsToRejoin),
+      },
+      stdio: ['ignore', logFileDescriptor, logFileDescriptor],
+      windowsHide: true,
+    });
+  } catch (error) {
+    if (logFileDescriptor !== undefined) closeSync(logFileDescriptor);
+    console.error('Failed to spawn replacement bot process:', error);
+    await editInteractionResponse(
+      process.env.APP_ID,
+      token,
+      "I couldn't start the replacement process. Start the bot manually with `npm start`.",
+    ).catch((responseError) => console.error('Failed to report restart error:', responseError));
+    process.exitCode = 1;
+    process.exit();
+    return;
+  }
+  closeSync(logFileDescriptor);
+
+  child.once('error', (error) => {
+    console.error(`Replacement bot process failed to start; see ${RESTART_LOG_FILE}:`, error);
+    process.exitCode = 1;
+    process.exit();
+  });
+  child.once('spawn', () => {
+    console.info(`Replacement bot process ${child.pid} started; logs: ${RESTART_LOG_FILE}`);
+    child.unref();
+    process.exit(0);
+  });
 }
 
 async function getInteractionResponse(applicationId, token) {
@@ -526,6 +797,26 @@ app.post('/interactions', verifyKeyMiddleware(process.env.PUBLIC_KEY), async fun
    */
   if (type === InteractionType.APPLICATION_COMMAND) {
     const { name } = data;
+
+    if (name === 'restart') {
+      const userId = req.body.member?.user?.id ?? req.body.user?.id;
+      if (!process.env.BOT_OWNER_ID || userId !== process.env.BOT_OWNER_ID) {
+        return res.send({
+          type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+          data: {
+            content: 'You are not authorized to restart this bot.',
+            flags: InteractionResponseFlags.EPHEMERAL,
+          },
+        });
+      }
+
+      res.send({
+        type: InteractionResponseType.DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE,
+        data: { flags: InteractionResponseFlags.EPHEMERAL },
+      });
+      void restartBot(req.body.token);
+      return;
+    }
 
     if (name === 'clear') {
       const channelId = req.body.channel_id;
@@ -822,76 +1113,14 @@ app.post('/interactions', verifyKeyMiddleware(process.env.PUBLIC_KEY), async fun
         return;
       }
 
-      let connection;
       try {
-        await guild.members.fetchMe();
-        connection = joinVoiceChannel({
-          channelId: channel.id,
-          guildId: guild.id,
-          adapterCreator: (methods) => guild.voiceAdapterCreator({
-            ...methods,
-            onVoiceStateUpdate: (packet) => {
-              console.info(`[voice:${guild.id}] Adapter received bot voice-state update.`);
-              methods.onVoiceStateUpdate(packet);
-              configureVoiceNetworking(connection, guild.id);
-            },
-            onVoiceServerUpdate: (packet) => {
-              console.info(
-                `[voice:${guild.id}] Adapter received voice-server update (endpoint: ${packet.endpoint ? 'present' : 'missing'}).`,
-              );
-              methods.onVoiceServerUpdate(packet);
-              configureVoiceNetworking(connection, guild.id);
-            },
-          }),
-          debug: VOICE_DEBUG_ENABLED,
-        });
-        connection.on('error', (error) => {
-          console.error(`[voice:${guild.id}] Voice connection error:`, error);
-        });
-        const observedNetworkings = new WeakSet();
-        connection.on('stateChange', (oldState, newState) => {
-          console.info(`[voice:${guild.id}] ${oldState.status} -> ${newState.status}`);
-          const networking = newState.networking;
-          if (!networking || observedNetworkings.has(networking)) return;
-
-          observedNetworkings.add(networking);
-          networking.on('stateChange', (oldNetworkingState, newNetworkingState) => {
-            console.info(
-              `[voice:${guild.id}] Voice network state: ${oldNetworkingState.code} -> ${newNetworkingState.code}`,
-            );
-          });
-          networking.on('close', (code) => {
-            console.error(`[voice:${guild.id}] Voice network WebSocket closed with code ${code}.`);
-          });
-        });
-        if (VOICE_DEBUG_ENABLED) {
-          connection.on('debug', (message) => {
-            console.debug(`[voice:${guild.id}] ${redactVoiceDebug(message)}`);
-          });
-        }
-        await entersState(connection, VoiceConnectionStatus.Ready, 15_000);
-        resetVoiceIdleTimeout(guild.id, connection);
+        await joinVoiceChannelInGuild(guild, channel);
       } catch (error) {
-        const connectionStatus = connection?.state.status ?? 'not created';
-        const receivedStateUpdate = Boolean(connection?.packets.state);
-        const receivedVoiceServerUpdate = Boolean(connection?.packets.server);
-        connection?.destroy();
-        console.error(
-          `Failed to join voice channel ${channel.id} in guild ${guild.id} ` +
-            `(state: ${connectionStatus}, voice state update: ${receivedStateUpdate}, ` +
-            `voice server update: ${receivedVoiceServerUpdate}):`,
-          error,
-        );
-        const message = error?.name === 'TimeoutError' || error?.code === 'ABORT_ERR'
-          ? `Discord's voice connection timed out while in the ${connectionStatus} state ` +
-            `(voice state update: ${receivedStateUpdate ? 'received' : 'missing'}, ` +
-            `voice server update: ${receivedVoiceServerUpdate ? 'received' : 'missing'}). Check the bot logs for connection details.`
-          : 'The Discord voice connection failed. Check the bot logs for details.';
         try {
           await editInteractionResponse(
             process.env.APP_ID,
             req.body.token,
-            message,
+            error.message,
           );
         } catch (responseError) {
           console.error('Failed to respond to /join interaction:', responseError);
@@ -924,7 +1153,17 @@ await client.login(process.env.DISCORD_TOKEN);
 if (!client.isReady()) {
   await new Promise((resolve) => client.once('clientReady', resolve));
 }
+await rejoinRestartedVoiceChannels();
 
-app.listen(PORT, () => {
+server = app.listen(PORT, () => {
   console.log('Listening on port', PORT);
+});
+server.on('error', (error) => {
+  console.error(`Failed to listen on port ${PORT}:`, error);
+  void client.destroy().then(() => {
+    process.exit(1);
+  }).catch((destroyError) => {
+    console.error('Failed to shut down Discord client after HTTP server error:', destroyError);
+    process.exit(1);
+  });
 });
