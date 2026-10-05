@@ -25,6 +25,23 @@ const CLEAR_COMMAND = {
   contexts: [1],
 };
 
+const SHOUT_COMMAND = {
+  name: 'shout',
+  description: 'Read one message aloud louder than usual',
+  type: 1,
+  integration_types: [0],
+  contexts: [1],
+  options: [
+    {
+      type: 3,
+      name: 'text',
+      description: 'The message to shout once',
+      required: true,
+      max_length: 2000,
+    },
+  ],
+};
+
 const ABBREVIATIONS_COMMAND = {
   name: 'abbreviations',
   description: 'Manage your personal spoken abbreviations',
@@ -84,6 +101,7 @@ const ALL_COMMANDS = [
   JOIN_COMMAND,
   DISCONNECT_COMMAND,
   CLEAR_COMMAND,
+  SHOUT_COMMAND,
   ABBREVIATIONS_COMMAND,
 ];
 

@@ -5,6 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import ffmpegPath from 'ffmpeg-static';
 import {
   AudioPlayerStatus,
   createAudioPlayer,
@@ -290,6 +291,55 @@ async function createSpeechFile(text) {
   }
 }
 
+async function normalizeShoutFile(inputPath) {
+  if (!ffmpegPath) {
+    throw new Error('The bundled FFmpeg executable is unavailable for shout normalization.');
+  }
+
+  const outputPath = join(tmpdir(), `discord-shout-${randomUUID()}.wav`);
+  try {
+    await new Promise((resolve, reject) => {
+      const child = spawn(
+        ffmpegPath,
+        [
+          '-nostdin',
+          '-hide_banner',
+          '-loglevel',
+          'error',
+          '-y',
+          '-i',
+          inputPath,
+          '-af',
+          'volume=30dB,alimiter=limit=0.95:level=0:latency=1',
+          '-ar',
+          '48000',
+          '-ac',
+          '2',
+          outputPath,
+        ],
+        { windowsHide: true },
+      );
+      let stderr = '';
+      child.stderr.setEncoding('utf8');
+      child.stderr.on('data', (chunk) => {
+        stderr += chunk;
+      });
+      child.on('error', reject);
+      child.on('close', (code) => {
+        if (code === 0) {
+          resolve();
+        } else {
+          reject(new Error(`Shout loudness normalization failed: ${stderr || `exit code ${code}`}`));
+        }
+      });
+    });
+    return outputPath;
+  } catch (error) {
+    await fs.rm(outputPath, { force: true });
+    throw error;
+  }
+}
+
 function playAudioResource(player, resource) {
   return new Promise((resolve, reject) => {
     let timeout;
@@ -323,14 +373,17 @@ function playAudioResource(player, resource) {
   });
 }
 
-async function speakInVoiceChannel(guildId, connection, text) {
+async function speakInVoiceChannel(guildId, connection, text, shout = false) {
   const activeConnection = voiceIdleTimeouts.get(guildId);
   if (activeConnection?.connection !== connection || connection.state.status !== VoiceConnectionStatus.Ready) {
     throw new Error('The bot is no longer connected to that voice channel.');
   }
 
-  const filePath = await createSpeechFile(text);
+  const speechFilePath = await createSpeechFile(text);
+  let filePath = speechFilePath;
   try {
+    if (shout) filePath = await normalizeShoutFile(speechFilePath);
+
     let voicePlayer = voicePlayers.get(guildId);
     if (voicePlayer?.connection !== connection) {
       voicePlayer?.player.stop(true);
@@ -349,14 +402,17 @@ async function speakInVoiceChannel(guildId, connection, text) {
     await playAudioResource(voicePlayer.player, resource);
   } finally {
     await fs.rm(filePath, { force: true });
+    if (filePath !== speechFilePath) {
+      await fs.rm(speechFilePath, { force: true });
+    }
   }
 }
 
-function enqueueSpeech(guildId, connection, text) {
+function enqueueSpeech(guildId, connection, text, shout = false) {
   const previousSpeech = speechQueues.get(guildId) ?? Promise.resolve();
   const currentSpeech = previousSpeech
     .catch((error) => console.error('Previous voice message failed:', error))
-    .then(() => speakInVoiceChannel(guildId, connection, text));
+    .then(() => speakInVoiceChannel(guildId, connection, text, shout));
   speechQueues.set(guildId, currentSpeech);
 
   return currentSpeech.finally(() => {
@@ -512,6 +568,74 @@ app.post('/interactions', verifyKeyMiddleware(process.env.PUBLIC_KEY), async fun
           );
         } catch (responseError) {
           console.error(`[clear:${channelId}] Failed to report the clear error:`, responseError);
+        }
+      }
+      return;
+    }
+
+    if (name === 'shout') {
+      const userId = req.body.member?.user?.id ?? req.body.user?.id;
+      const text = data.options?.find((option) => option.name === 'text')?.value?.trim();
+      if (req.body.guild_id || !userId) {
+        return res.send({
+          type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+          data: {
+            content: 'Use this command in a direct message with the bot.',
+            flags: InteractionResponseFlags.EPHEMERAL,
+          },
+        });
+      }
+
+      if (!text) {
+        return res.send({
+          type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+          data: {
+            content: 'Provide the text you want me to shout.',
+            flags: InteractionResponseFlags.EPHEMERAL,
+          },
+        });
+      }
+
+      const match = findJoinedVoiceConnection(userId);
+      if (!match) {
+        return res.send({
+          type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+          data: {
+            content: 'Join a voice channel that I have joined, then try `/shout` again.',
+            flags: InteractionResponseFlags.EPHEMERAL,
+          },
+        });
+      }
+
+      res.send({
+        type: InteractionResponseType.DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE,
+        data: { flags: InteractionResponseFlags.EPHEMERAL },
+      });
+      resetVoiceIdleTimeout(match.guildId, match.activeConnection.connection);
+      try {
+        await enqueueSpeech(
+          match.guildId,
+          match.activeConnection.connection,
+          replaceAbbreviations(userId, text),
+          true,
+        );
+        await editInteractionResponse(
+          process.env.APP_ID,
+          req.body.token,
+          `Shouted your message in <#${match.activeConnection.connection.joinConfig.channelId}>.`,
+        );
+      } catch (error) {
+        console.error(`[shout:${userId}] Failed to read message aloud:`, error);
+        try {
+          await editInteractionResponse(
+            process.env.APP_ID,
+            req.body.token,
+            process.platform === 'win32'
+              ? "I couldn't shout that message. Check that Windows speech synthesis and voice playback are available."
+              : 'Local speech synthesis is only configured for Windows.',
+          );
+        } catch (responseError) {
+          console.error(`[shout:${userId}] Failed to report the speech error:`, responseError);
         }
       }
       return;

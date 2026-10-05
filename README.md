@@ -10,6 +10,10 @@ direct messages aloud using Windows' built-in speech synthesis.
 - `/clear` in a direct message removes the bot's existing messages from that
   DM, then reports how many it deleted. Discord does not let the bot delete
   messages you sent, and the command's confirmation remains in the conversation.
+- `/shout` in a direct message reads the text you provide once at higher volume
+  in the voice channel you're currently sharing with the bot. It boosts that
+  message by 30 dB with a limiter to prevent clipping, and does not change the
+  volume of regular messages.
 - `/abbreviations` in a direct message lets you add, remove, and list your
   personal spoken-text replacements with the `add`, `remove`, `list`, and
   `toggle` subcommands. Replacements are case-insensitive whole-word matches,
