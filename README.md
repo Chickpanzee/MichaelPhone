@@ -10,6 +10,11 @@ direct messages aloud using Windows' built-in speech synthesis.
 - `/clear` in a direct message removes the bot's existing messages from that
   DM, then reports how many it deleted. Discord does not let the bot delete
   messages you sent, and the command's confirmation remains in the conversation.
+- `/abbreviations` in a direct message lets you add, remove, and list your
+  personal spoken-text replacements with the `add`, `remove`, `list`, and
+  `toggle` subcommands. Replacements are case-insensitive whole-word matches,
+  enabled by default, and saved locally in `data/abbreviations.json`. Each user
+  can save up to 25 replacements.
 - DM the bot while you share a voice channel with it, and it reads your message
   aloud. If you're in more than one server where the bot is connected, it uses
   the connection with the most recent activity.
@@ -66,7 +71,8 @@ npm run register
 ```
 
 This publishes the command list defined in `commands.js` as global commands.
-Registration errors are reported in the console. Start the bot with:
+Registration errors are reported in the console. After adding or changing slash
+commands, run `npm run register` again. Start the bot with:
 
 ```powershell
 npm start

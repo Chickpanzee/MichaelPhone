@@ -4,7 +4,7 @@ import express from 'express';
 import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import {
   AudioPlayerStatus,
   createAudioPlayer,
@@ -29,9 +29,12 @@ const PORT = process.env.PORT || 3000;
 const voiceIdleTimeouts = new Map();
 const voicePlayers = new Map();
 const speechQueues = new Map();
+const abbreviationSettings = new Map();
+const ABBREVIATIONS_FILE = join(process.cwd(), 'data', 'abbreviations.json');
 const VOICE_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
 const VOICE_PLAYBACK_TIMEOUT_MS = 10 * 60 * 1000;
 const VOICE_DEBUG_ENABLED = process.env.VOICE_DEBUG === 'true';
+let abbreviationSettingsWrite = Promise.resolve();
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -84,6 +87,100 @@ function redactVoiceDebug(message) {
     /("(?:token|secret_key|session_id)"\s*:\s*)"(?:\\.|[^"\\])*"/gi,
     '$1"[redacted]"',
   );
+}
+
+function isRecord(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+async function loadAbbreviationSettings() {
+  let savedSettings;
+  try {
+    savedSettings = JSON.parse(await fs.readFile(ABBREVIATIONS_FILE, 'utf8'));
+  } catch (error) {
+    if (error.code === 'ENOENT') return;
+    throw error;
+  }
+
+  if (!isRecord(savedSettings)) {
+    throw new Error('Abbreviation settings file must contain a JSON object.');
+  }
+
+  for (const [userId, settings] of Object.entries(savedSettings)) {
+    if (
+      !isRecord(settings) ||
+      typeof settings.enabled !== 'boolean' ||
+      !isRecord(settings.replacements) ||
+      Object.entries(settings.replacements).some(
+        ([abbreviation, replacement]) =>
+          !abbreviation || typeof replacement !== 'string' || !replacement,
+      )
+    ) {
+      throw new Error(`Invalid abbreviation settings for user ${userId}.`);
+    }
+    abbreviationSettings.set(userId, settings);
+  }
+}
+
+async function saveAbbreviationSettings(settings) {
+  const temporaryFile = `${ABBREVIATIONS_FILE}.${randomUUID()}.tmp`;
+  await fs.mkdir(dirname(ABBREVIATIONS_FILE), { recursive: true });
+  try {
+    await fs.writeFile(
+      temporaryFile,
+      JSON.stringify(Object.fromEntries(settings), null, 2),
+      { flag: 'wx' },
+    );
+    await fs.rename(temporaryFile, ABBREVIATIONS_FILE);
+  } catch (error) {
+    await fs.rm(temporaryFile, { force: true });
+    throw error;
+  }
+}
+
+function getAbbreviationSettings(userId) {
+  return abbreviationSettings.get(userId) ?? { enabled: true, replacements: {} };
+}
+
+function updateAbbreviationSettings(userId, update) {
+  const operation = abbreviationSettingsWrite.then(async () => {
+    const current = getAbbreviationSettings(userId);
+    const updated = {
+      enabled: current.enabled,
+      replacements: { ...current.replacements },
+    };
+    const result = update(updated);
+    if (!result.changed) return result.content;
+
+    const nextSettings = new Map(abbreviationSettings);
+    nextSettings.set(userId, updated);
+    await saveAbbreviationSettings(nextSettings);
+    abbreviationSettings.set(userId, updated);
+    return result.content;
+  });
+  abbreviationSettingsWrite = operation.catch((error) => {
+    console.error('Failed to save abbreviation settings:', error);
+  });
+  return operation;
+}
+
+function replaceAbbreviations(userId, text) {
+  const settings = getAbbreviationSettings(userId);
+  if (!settings.enabled) return text;
+
+  const replacements = Object.entries(settings.replacements)
+    .sort(([first], [second]) => second.length - first.length);
+  if (replacements.length === 0) return text;
+
+  const byAbbreviation = new Map(replacements);
+  const alternatives = replacements
+    .map(([abbreviation]) => abbreviation.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+    .join('|');
+  const pattern = new RegExp(
+    `(?<![\\p{L}\\p{N}_])(?:${alternatives})(?![\\p{L}\\p{N}_])`,
+    'giu',
+  );
+  return text.replace(pattern, (match) => byAbbreviation.get(match.toLowerCase()) ?? match);
 }
 
 function resetVoiceIdleTimeout(guildId, connection) {
@@ -284,7 +381,7 @@ client.on('messageCreate', (message) => {
   void enqueueSpeech(
     match.guildId,
     match.activeConnection.connection,
-    message.content,
+    replaceAbbreviations(message.author.id, message.content),
   ).catch(async (error) => {
     console.error('Failed to read DM aloud:', error);
     try {
@@ -418,6 +515,122 @@ app.post('/interactions', verifyKeyMiddleware(process.env.PUBLIC_KEY), async fun
         }
       }
       return;
+    }
+
+    if (name === 'abbreviations') {
+      const userId = req.body.member?.user?.id ?? req.body.user?.id;
+      const subcommand = data.options?.find((option) => option.type === 1);
+      const options = subcommand?.options ?? [];
+      const getOption = (optionName) =>
+        options.find((option) => option.name === optionName)?.value;
+
+      if (req.body.guild_id || !userId || !subcommand) {
+        return res.send({
+          type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+          data: {
+            content: 'Use this command in a direct message with the bot.',
+            flags: InteractionResponseFlags.EPHEMERAL,
+          },
+        });
+      }
+
+      try {
+        let content;
+        if (subcommand.name === 'toggle') {
+          content = await updateAbbreviationSettings(userId, (settings) => {
+            settings.enabled = !settings.enabled;
+            return {
+              changed: true,
+              content: `Abbreviation replacements are now ${settings.enabled ? 'on' : 'off'}.`,
+            };
+          });
+        } else if (subcommand.name === 'add') {
+          const abbreviation = getOption('abbreviation')?.trim().toLowerCase();
+          const replacement = getOption('replacement')?.trim();
+          if (!abbreviation || !replacement) {
+            content = 'Provide a non-empty abbreviation and replacement.';
+          } else {
+            content = await updateAbbreviationSettings(userId, (settings) => {
+              if (
+                !Object.hasOwn(settings.replacements, abbreviation) &&
+                Object.keys(settings.replacements).length >= 25
+              ) {
+                return {
+                  changed: false,
+                  content: 'You can have at most 25 abbreviation replacements.',
+                };
+              }
+
+              settings.replacements[abbreviation] = replacement;
+              return {
+                changed: true,
+                content: `Added “${abbreviation}” → “${replacement}”. Replacements are ${settings.enabled ? 'on' : 'off'}.`,
+              };
+            });
+          }
+        } else if (subcommand.name === 'remove') {
+          const abbreviation = getOption('abbreviation')?.trim().toLowerCase();
+          if (!abbreviation) {
+            content = 'Provide an abbreviation to remove.';
+          } else {
+            content = await updateAbbreviationSettings(userId, (settings) => {
+              if (!Object.hasOwn(settings.replacements, abbreviation)) {
+                return {
+                  changed: false,
+                  content: `No replacement is set for “${abbreviation}”.`,
+                };
+              }
+
+              delete settings.replacements[abbreviation];
+              return {
+                changed: true,
+                content: `Removed the replacement for “${abbreviation}”.`,
+              };
+            });
+          }
+        } else if (subcommand.name === 'list') {
+          await abbreviationSettingsWrite;
+          const settings = getAbbreviationSettings(userId);
+          const lines = Object.entries(settings.replacements)
+            .map(([abbreviation, replacement]) => `“${abbreviation}” → “${replacement}”`);
+          content = `Abbreviation replacements are ${settings.enabled ? 'on' : 'off'}.`;
+          if (lines.length === 0) {
+            content += '\nYou have no replacements yet. Use `/abbreviations add` to add one.';
+          } else {
+            const maxContentLength = 1800;
+            const displayedLines = [];
+            for (const line of lines) {
+              const nextLength = content.length + 1 + line.length;
+              if (nextLength > maxContentLength) break;
+              content += '\n' + line;
+              displayedLines.push(line);
+            }
+            const remainingCount = lines.length - displayedLines.length;
+            if (remainingCount > 0) {
+              content += `\n…and ${remainingCount} more.`;
+            }
+          }
+        } else {
+          content = 'Choose toggle, add, remove, or list.';
+        }
+
+        return res.send({
+          type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+          data: {
+            content,
+            flags: InteractionResponseFlags.EPHEMERAL,
+          },
+        });
+      } catch (error) {
+        console.error(`[abbreviations:${userId}] Failed to update abbreviation settings:`, error);
+        return res.send({
+          type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+          data: {
+            content: "I couldn't save your abbreviation settings. Check the bot logs for details.",
+            flags: InteractionResponseFlags.EPHEMERAL,
+          },
+        });
+      }
     }
 
     if (name === 'disconnect') {
@@ -582,6 +795,7 @@ app.post('/interactions', verifyKeyMiddleware(process.env.PUBLIC_KEY), async fun
   return res.status(400).json({ error: 'unknown interaction type' });
 });
 
+await loadAbbreviationSettings();
 await client.login(process.env.DISCORD_TOKEN);
 if (!client.isReady()) {
   await new Promise((resolve) => client.once('clientReady', resolve));
