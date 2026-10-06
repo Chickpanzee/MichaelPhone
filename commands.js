@@ -50,6 +50,14 @@ const RESTART_COMMAND = {
   contexts: [1],
 };
 
+const SHUTDOWN_COMMAND = {
+  name: 'shutdown',
+  description: 'Turn off the bot (owner only)',
+  type: 1,
+  integration_types: [0],
+  contexts: [1],
+};
+
 const ABBREVIATIONS_COMMAND = {
   name: 'abbreviations',
   description: 'Manage your personal spoken abbreviations',
@@ -111,6 +119,7 @@ const ALL_COMMANDS = [
   CLEAR_COMMAND,
   SHOUT_COMMAND,
   RESTART_COMMAND,
+  SHUTDOWN_COMMAND,
   ABBREVIATIONS_COMMAND,
 ];
 

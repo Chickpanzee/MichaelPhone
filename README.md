@@ -10,6 +10,7 @@ direct messages aloud using Windows' built-in speech synthesis.
 - The owner-only `/restart` command leaves every voice channel before restarting,
   then rejoins the same channels after the bot reconnects to Discord. The
   replacement process writes startup and rejoin logs to `data/restart.log`.
+- The owner-only `/shutdown` command leaves every voice channel and stops the bot.
 - `/clear` in a direct message removes the bot's existing messages from that
   DM, then reports how many it deleted. Discord does not let the bot delete
   messages you sent, and the command's confirmation remains in the conversation.

@@ -661,12 +661,6 @@ async function restartBot(token) {
   if (restartInProgress) return;
   restartInProgress = true;
 
-  try {
-    await editInteractionResponse(process.env.APP_ID, token, 'Restarting the bot now...');
-  } catch (error) {
-    console.error('Failed to confirm bot restart:', error);
-  }
-
   const channelsToRejoin = [...voiceIdleTimeouts.entries()].map(([guildId, activeConnection]) => ({
     guildId,
     channelId: activeConnection.connection.joinConfig.channelId,
@@ -739,6 +733,33 @@ async function restartBot(token) {
   });
 }
 
+async function shutdownBot(token) {
+  if (restartInProgress) return;
+  restartInProgress = true;
+
+  try {
+    const allDisconnected = await disconnectVoiceConnectionsForRestart();
+    if (!allDisconnected) {
+      console.warn('Shutting down despite an unconfirmed voice disconnect.');
+    }
+    await closeServer();
+    await client.destroy();
+    process.exit(0);
+  } catch (error) {
+    console.error('Failed to shut down bot cleanly:', error);
+    try {
+      await editInteractionResponse(
+        process.env.APP_ID,
+        token,
+        "I couldn't shut down cleanly. Check the bot logs for details.",
+      );
+    } catch (responseError) {
+      console.error('Failed to report shutdown error:', responseError);
+    }
+    restartInProgress = false;
+  }
+}
+
 async function getInteractionResponse(applicationId, token) {
   const response = await fetch(
     `https://discord.com/api/v10/webhooks/${applicationId}/${token}/messages/@original`,
@@ -798,6 +819,29 @@ app.post('/interactions', verifyKeyMiddleware(process.env.PUBLIC_KEY), async fun
   if (type === InteractionType.APPLICATION_COMMAND) {
     const { name } = data;
 
+    if (name === 'shutdown') {
+      const userId = req.body.member?.user?.id ?? req.body.user?.id;
+      if (!process.env.BOT_OWNER_ID || userId !== process.env.BOT_OWNER_ID) {
+        return res.send({
+          type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+          data: {
+            content: 'You are not authorized to shut down this bot.',
+            flags: InteractionResponseFlags.EPHEMERAL,
+          },
+        });
+      }
+
+      res.send({
+        type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+        data: {
+          content: 'Disconnecting from voice calls and shutting down.',
+          flags: InteractionResponseFlags.EPHEMERAL,
+        },
+      });
+      setTimeout(() => void shutdownBot(req.body.token), 250);
+      return;
+    }
+
     if (name === 'restart') {
       const userId = req.body.member?.user?.id ?? req.body.user?.id;
       if (!process.env.BOT_OWNER_ID || userId !== process.env.BOT_OWNER_ID) {
@@ -811,10 +855,13 @@ app.post('/interactions', verifyKeyMiddleware(process.env.PUBLIC_KEY), async fun
       }
 
       res.send({
-        type: InteractionResponseType.DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE,
-        data: { flags: InteractionResponseFlags.EPHEMERAL },
+        type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+        data: {
+          content: 'Leaving voice calls and restarting the bot.',
+          flags: InteractionResponseFlags.EPHEMERAL,
+        },
       });
-      void restartBot(req.body.token);
+      setTimeout(() => void restartBot(req.body.token), 250);
       return;
     }
 
