@@ -4,6 +4,7 @@ import express from 'express';
 import { randomUUID } from 'node:crypto';
 import { closeSync, mkdirSync, openSync } from 'node:fs';
 import { promises as fs } from 'node:fs';
+import { franc } from 'franc-min';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import ffmpegPath from 'ffmpeg-static';
@@ -40,6 +41,55 @@ const VOICE_PLAYBACK_TIMEOUT_MS = 10 * 60 * 1000;
 const VOICE_DEBUG_ENABLED = process.env.VOICE_DEBUG === 'true';
 let abbreviationSettingsWrite = Promise.resolve();
 let restartInProgress = false;
+const SPEECH_LANGUAGE_CODES = {
+  amh: 'am',
+  arb: 'ar',
+  ben: 'bn',
+  bul: 'bg',
+  ces: 'cs',
+  cmn: 'zh',
+  deu: 'de',
+  ell: 'el',
+  eng: 'en',
+  fas: 'fa',
+  fra: 'fr',
+  guj: 'gu',
+  hau: 'ha',
+  hin: 'hi',
+  hun: 'hu',
+  ind: 'id',
+  ita: 'it',
+  jav: 'jv',
+  jpn: 'ja',
+  kan: 'kn',
+  kin: 'rw',
+  kor: 'ko',
+  mal: 'ml',
+  mar: 'mr',
+  mya: 'my',
+  nld: 'nl',
+  pan: 'pa',
+  pes: 'fa',
+  pol: 'pl',
+  por: 'pt',
+  ron: 'ro',
+  rus: 'ru',
+  sin: 'si',
+  spa: 'es',
+  sun: 'su',
+  swe: 'sv',
+  swh: 'sw',
+  tam: 'ta',
+  tel: 'te',
+  tha: 'th',
+  tgl: 'tl',
+  tur: 'tr',
+  ukr: 'uk',
+  urd: 'ur',
+  vie: 'vi',
+  yor: 'yo',
+  zul: 'zu',
+};
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -420,7 +470,31 @@ async function rejoinRestartedVoiceChannels() {
   }
 }
 
-async function createSpeechFile(text) {
+function detectSpeechLanguage(text) {
+  const trimmedText = text.trim();
+  if (!trimmedText) return undefined;
+  if (Array.from(trimmedText).length < 3) {
+    if (/[\u3040-\u30ff]/u.test(trimmedText)) return 'ja';
+    if (/[\uac00-\ud7af]/u.test(trimmedText)) return 'ko';
+    if (/[\u3400-\u9fff]/u.test(trimmedText)) return 'zh';
+    if (/[\u0400-\u052f]/u.test(trimmedText)) return 'ru';
+    if (/[\u0600-\u06ff]/u.test(trimmedText)) return 'ar';
+    if (/[\u0590-\u05ff]/u.test(trimmedText)) return 'he';
+    if (/[\u0900-\u097f]/u.test(trimmedText)) return 'hi';
+    if (/[\u0980-\u09ff]/u.test(trimmedText)) return 'bn';
+    if (/[\u0a00-\u0a7f]/u.test(trimmedText)) return 'pa';
+    if (/[\u0b80-\u0bff]/u.test(trimmedText)) return 'ta';
+    if (/[\u0c00-\u0c7f]/u.test(trimmedText)) return 'te';
+    if (/[\u0c80-\u0cff]/u.test(trimmedText)) return 'kn';
+    if (/[\u0d00-\u0d7f]/u.test(trimmedText)) return 'ml';
+    if (/[\u0e00-\u0e7f]/u.test(trimmedText)) return 'th';
+    return undefined;
+  }
+  const detectedLanguage = franc(text, { minLength: 3 });
+  return SPEECH_LANGUAGE_CODES[detectedLanguage];
+}
+
+async function createSpeechFile(text, language) {
   if (process.platform !== 'win32') {
     throw new Error('Local speech synthesis is only configured for Windows.');
   }
@@ -434,6 +508,17 @@ async function createSpeechFile(text) {
     '  Add-Type -AssemblyName System.Speech',
     `  $text = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encodedText}'))`,
     '  $synth = New-Object System.Speech.Synthesis.SpeechSynthesizer',
+    ...(language
+      ? [
+          `  $voice = $synth.GetInstalledVoices() | Where-Object { $_.Enabled -and $_.VoiceInfo.Culture.TwoLetterISOLanguageName -eq '${language}' } | Select-Object -First 1`,
+          '  if ($voice) {',
+          '    $synth.SelectVoice($voice.VoiceInfo.Name)',
+          `    [Console]::Error.WriteLine('Using installed ${language} speech voice: ' + $voice.VoiceInfo.Name)`,
+          '  } else {',
+          `    [Console]::Error.WriteLine('No installed ${language} speech voice; using the default voice.')`,
+          '  }',
+        ]
+      : []),
     `  $synth.SetOutputToWaveFile('${escapedPath}')`,
     '  $synth.Speak($text)',
     '  $synth.Dispose()',
@@ -459,6 +544,11 @@ async function createSpeechFile(text) {
       child.on('error', reject);
       child.on('close', (code) => {
         if (code === 0) {
+          if (stderr.trim()) {
+            for (const line of stderr.trim().split(/\r?\n/u)) {
+              console.info(`[tts] ${line}`);
+            }
+          }
           resolve();
         } else {
           reject(new Error(`Windows speech synthesis failed: ${stderr || `exit code ${code}`}`));
@@ -560,7 +650,11 @@ async function speakInVoiceChannel(guildId, connection, text, shout = false) {
     throw new Error('The bot is no longer connected to that voice channel.');
   }
 
-  const speechFilePath = await createSpeechFile(text);
+  const language = detectSpeechLanguage(text);
+  const speechFilePath = await createSpeechFile(text, language);
+  if (language) {
+    console.info(`[voice:${guildId}] Detected speech language: ${language}.`);
+  }
   let filePath = speechFilePath;
   try {
     if (shout) filePath = await normalizeShoutFile(speechFilePath);

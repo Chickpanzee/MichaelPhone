@@ -30,7 +30,12 @@ direct messages aloud using Windows' built-in speech synthesis.
   DM. Either activity restarts the idle timer.
 
 Speech synthesis runs locally through Windows Speech; no cloud TTS service or
-key is needed. The bot must run on Windows for speech playback.
+key is needed. The bot detects the language of each message and selects a
+matching installed Windows speech voice when available; otherwise, it uses the
+default voice. Install additional speech voices in Windows **Settings > Time &
+language > Speech > Manage voices > Add voices**. The bot logs whether a
+matching voice was found with a `[tts]` message. The bot must run on Windows for
+speech playback.
 
 ## Requirements
 
