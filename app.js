@@ -1117,10 +1117,57 @@ app.post('/interactions', verifyKeyMiddleware(process.env.PUBLIC_KEY), async fun
                 };
               }
 
+              const existed = Object.hasOwn(settings.replacements, abbreviation);
               settings.replacements[abbreviation] = replacement;
               return {
                 changed: true,
-                content: `Added “${abbreviation}” → “${replacement}”. Replacements are ${settings.enabled ? 'on' : 'off'}.`,
+                content: existed
+                  ? `Updated “${abbreviation}” → “${replacement}”. Replacements are ${settings.enabled ? 'on' : 'off'}.`
+                  : `Added “${abbreviation}” → “${replacement}”. Replacements are ${settings.enabled ? 'on' : 'off'}.`,
+              };
+            });
+          }
+        } else if (subcommand.name === 'edit') {
+          const abbreviation = getOption('abbreviation')?.trim().toLowerCase();
+          const replacement = getOption('replacement')?.trim();
+          if (!abbreviation || !replacement) {
+            content = 'Provide a non-empty abbreviation and replacement.';
+          } else {
+            content = await updateAbbreviationSettings(userId, (settings) => {
+              if (!Object.hasOwn(settings.replacements, abbreviation)) {
+                return {
+                  changed: false,
+                  content: `No replacement is set for “${abbreviation}”. Use /abbreviations add to create one.`,
+                };
+              }
+
+              settings.replacements[abbreviation] = replacement;
+              return {
+                changed: true,
+                content: `Updated “${abbreviation}” → “${replacement}”. Replacements are ${settings.enabled ? 'on' : 'off'}.`,
+              };
+            });
+          }
+        } else if (subcommand.name === 'replace') {
+          const from = getOption('from')?.trim().toLowerCase();
+          const to = getOption('to')?.trim().toLowerCase();
+          if (!from || !to) {
+            content = 'Provide a non-empty current term and replacement term.';
+          } else {
+            content = await updateAbbreviationSettings(userId, (settings) => {
+              if (!Object.hasOwn(settings.replacements, from)) {
+                return {
+                  changed: false,
+                  content: `No replacement is set for “${from}”. Use /abbreviations add to create one.`,
+                };
+              }
+
+              const currentReplacement = settings.replacements[from];
+              delete settings.replacements[from];
+              settings.replacements[to] = currentReplacement;
+              return {
+                changed: true,
+                content: `Changed the activation term from “${from}” to “${to}”. The spoken value remains “${currentReplacement}”. Replacements are ${settings.enabled ? 'on' : 'off'}.`,
               };
             });
           }
@@ -1167,7 +1214,7 @@ app.post('/interactions', verifyKeyMiddleware(process.env.PUBLIC_KEY), async fun
             }
           }
         } else {
-          content = 'Choose toggle, add, remove, or list.';
+          content = 'Choose toggle, add, edit, replace, remove, or list.';
         }
 
         return res.send({

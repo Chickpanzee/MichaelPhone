@@ -18,9 +18,11 @@ direct messages aloud using Windows' built-in speech synthesis.
   in the voice channel you're currently sharing with the bot. It boosts that
   message by 30 dB with a limiter to prevent clipping, and does not change the
   volume of regular messages.
-- `/abbreviations` in a direct message lets you add, remove, and list your
-  personal spoken-text replacements with the `add`, `remove`, `list`, and
-  `toggle` subcommands. Replacements are case-insensitive whole-word matches,
+- `/abbreviations` in a direct message lets you add, edit, replace, remove, and list your
+  personal spoken-text replacements with the `add`, `edit`, `replace`, `remove`, `list`, and
+  `toggle` subcommands. Use `edit` to change the spoken meaning and `replace` to change the
+  activation term while keeping the same spoken output. Replacements are case-insensitive
+  whole-word matches,
   enabled by default, and saved locally in `data/abbreviations.json`. Each user
   can save up to 25 replacements.
 - DM the bot while you share a voice channel with it, and it reads your message

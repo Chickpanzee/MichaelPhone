@@ -93,6 +93,48 @@ const ABBREVIATIONS_COMMAND = {
     },
     {
       type: 1,
+      name: 'edit',
+      description: 'Change what an existing abbreviation says',
+      options: [
+        {
+          type: 3,
+          name: 'abbreviation',
+          description: 'The abbreviation to edit',
+          required: true,
+          max_length: 32,
+        },
+        {
+          type: 3,
+          name: 'replacement',
+          description: 'The new text to say instead',
+          required: true,
+          max_length: 100,
+        },
+      ],
+    },
+    {
+      type: 1,
+      name: 'replace',
+      description: 'Change the activation term for an existing abbreviation',
+      options: [
+        {
+          type: 3,
+          name: 'from',
+          description: 'The current abbreviation to replace',
+          required: true,
+          max_length: 32,
+        },
+        {
+          type: 3,
+          name: 'to',
+          description: 'The new activation term',
+          required: true,
+          max_length: 32,
+        },
+      ],
+    },
+    {
+      type: 1,
       name: 'remove',
       description: 'Remove one of your abbreviation replacements',
       options: [
